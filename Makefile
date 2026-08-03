@@ -6,6 +6,7 @@
 # make check         : lance les checks CLI (topologie + machine à états piste)
 # make run           : démarre l'économiseur d'écran
 # make render        : rend une frame de la scène aéroport dans /tmp/airport.png
+# make gif            : rend un GIF animé (décollage) dans docs/screenshots/demo.gif
 
 DERIVED = $(HOME)/Library/Developer/Xcode/DerivedData
 SAVER   = $(HOME)/Library/Screen Savers/airport-saver.saver
@@ -32,6 +33,7 @@ install-debug: build
 check:
 	swiftc -o /tmp/topology_check $(SRC)/ScreenTopology.swift checks/topology_check.swift && /tmp/topology_check
 	swiftc -o /tmp/runway_check $(SRC)/RunwayPlane.swift checks/runway_check.swift && /tmp/runway_check
+	swiftc -o /tmp/handoff_check $(SRC)/PixelCanvas.swift $(SRC)/PixelScene.swift $(SRC)/Sprites.swift $(SRC)/RunwayPlane.swift $(SRC)/ScreenTopology.swift $(SRC)/AirportScene.swift $(SRC)/SkyScene.swift $(SRC)/FlightCoordinator.swift checks/handoff_check.swift && /tmp/handoff_check
 
 run:
 	open -a ScreenSaverEngine
@@ -41,4 +43,8 @@ render:
 	/tmp/render airport /tmp/airport.png 480 10
 	open /tmp/airport.png
 
-.PHONY: build release install install-debug check run render
+gif:
+	swiftc -o /tmp/render $(SRC)/PixelCanvas.swift $(SRC)/PixelScene.swift $(SRC)/Sprites.swift $(SRC)/RunwayPlane.swift $(SRC)/ScreenTopology.swift $(SRC)/AirportScene.swift $(SRC)/SkyScene.swift $(SRC)/FlightCoordinator.swift checks/render.swift
+	/tmp/render gif docs/screenshots/demo.gif 480 24
+
+.PHONY: build release install install-debug check run render gif

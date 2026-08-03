@@ -214,6 +214,66 @@ struct Render {
         print("wrote \(outPath) (t=\(time)s)")
     }
 
+    /// Animated GIF of the airport scene for the README hero image. A
+    /// forced takeoff (see the "takeoff" scene case below) covers a full
+    /// taxi-in/lineup/roll/climb-out cycle in ~23s at the default constants
+    /// (measured against checks/runway_check.swift's duration table), so a
+    /// ~24s slice from t=0 always shows one complete departure; `duration`
+    /// can be overridden to capture more ambient traffic once the forced
+    /// takeoff has cleared.
+    ///
+    /// Rendered at 1x logical scale (no 2x upscale, unlike the PNG path
+    /// below) to keep the file small -- pixel art doesn't need the extra
+    /// resolution, and GIF frames add up fast. Every 3rd simulated frame is
+    /// captured (10fps; simulating at 1/30s keeps the *motion* smooth even
+    /// though fewer frames are written), which keeps a ~24s/480px-wide GIF
+    /// comfortably under 2MB -- see the report for the actual measured size.
+    static func renderGif(outPath: String, width: Int, duration: Double) {
+        let airport = AirportScene(canvasWidth: width)
+        airport.forceTakeoff()
+
+        let dt = 1.0 / 30.0
+        let captureEvery = 3
+        let frameDelay = dt * Double(captureEvery)
+        let estimatedFrames = Int(duration / frameDelay) + 1
+
+        guard let dest = CGImageDestinationCreateWithURL(
+            URL(fileURLWithPath: outPath) as CFURL, "com.compuserve.gif" as CFString, estimatedFrames, nil
+        ) else {
+            print("destination GIF a échoué")
+            exit(1)
+        }
+        CGImageDestinationSetProperties(dest, [
+            kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFLoopCount: 0],
+        ] as CFDictionary)
+        let frameProperties = [
+            kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFDelayTime: frameDelay],
+        ] as CFDictionary
+
+        let canvas = PixelCanvas(width: width)
+        var t = 0.0
+        var step = 0
+        var framesWritten = 0
+        while t < duration {
+            airport.update(dt: dt)
+            if step % captureEvery == 0 {
+                canvas.clear()
+                airport.draw(on: canvas)
+                if let img = canvas.image() {
+                    CGImageDestinationAddImage(dest, img, frameProperties)
+                    framesWritten += 1
+                }
+            }
+            t += dt
+            step += 1
+        }
+        guard CGImageDestinationFinalize(dest) else {
+            print("finalize GIF a échoué")
+            exit(1)
+        }
+        print("wrote \(outPath) (\(framesWritten) frames, \(duration)s at \(1 / frameDelay)fps)")
+    }
+
     static func main() {
         let args = CommandLine.arguments
         guard args.count >= 3 else {
@@ -223,7 +283,10 @@ struct Render {
         let sceneName = args[1]
         let outPath = args[2]
         let width = args.count > 3 ? Int(args[3]) ?? 480 : 480
-        let time = args.count > 4 ? Double(args[4]) ?? 0.4 : 0.4
+        // "gif" wants a much longer default slice than a single still frame
+        // (see renderGif's doc) -- everything else keeps the short 0.4s
+        // default meant for one-off PNG frames.
+        let time = args.count > 4 ? Double(args[4]) ?? 0.4 : (sceneName == "gif" ? 24.0 : 0.4)
         // Traffic (spawn timing, fleet picks, positions/speeds) all draws
         // from FlightCoordinator.shared.rng (see FlightCoordinator.swift) --
         // pinning it here before any scene exists makes "same command, same
@@ -232,6 +295,10 @@ struct Render {
         let seed = args.count > 5 ? UInt64(args[5]) ?? 42 : 42
         FlightCoordinator.reseed(seed)
 
+        if sceneName == "gif" {
+            renderGif(outPath: outPath, width: width, duration: time)
+            return
+        }
         if sceneName == "handoff" {
             renderHandoff(outPath: outPath, width: width, time: time)
             return

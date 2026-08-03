@@ -5,7 +5,7 @@ atterrissent, roulent, se garent et redécollent — et qui **traverse tes écra
 Sur un setup multi-moniteurs, un avion qui décolle sort de l'écran principal et
 continue son vol sur les écrans voisins, à cheval sur le bezel, sans coupure.
 
-![Décollage](docs/screenshots/takeoff-roll.png)
+![Démo](docs/screenshots/demo.gif)
 
 ## Ce que ça fait
 
@@ -28,9 +28,9 @@ continue son vol sur les écrans voisins, à cheval sur le bezel, sans coupure.
   courte régionale, une allongée long-courrier, six livrées, et des variantes
   inclinées montée/descente générées par rotation de grille.
 
-|                                       |                                   |
-| ------------------------------------- | --------------------------------- |
-| ![Montée](docs/screenshots/climb.png) | ![Ciel](docs/screenshots/sky.png) |
+|                                                 |                                       |                                   |
+| ----------------------------------------------- | ------------------------------------- | --------------------------------- |
+| ![Décollage](docs/screenshots/takeoff-roll.png) | ![Montée](docs/screenshots/climb.png) | ![Ciel](docs/screenshots/sky.png) |
 
 ## Installation
 
@@ -45,8 +45,9 @@ Pour le lancer tout de suite : `make run`.
 
 ```bash
 make build     # compile le .saver (Debug)
-make check     # checks CLI : topologie écrans + machine à états piste
+make check     # checks CLI : topologie écrans + machine à états piste + continuité du handoff
 make render    # rend une frame de la scène dans /tmp/airport.png et l'ouvre
+make gif       # rend un décollage complet dans docs/screenshots/demo.gif
 ```
 
 Le projet a un principe central : **tout se vérifie à l'œil, sans écran de
@@ -57,6 +58,7 @@ quelle scène en PNG à un instant donné :
 /tmp/render airport out.png 480 12    # scène aéroport, largeur 480, t=12s
 /tmp/render sky out.png 645 8         # scène ciel, largeur ultra-wide
 /tmp/render takeoff out.png 480 16    # décollage forcé à t=0 (déterministe)
+/tmp/render gif out.gif 480 24        # GIF animé, décollage forcé, 24s à 10fps
 ```
 
 La logique pure (`RunwayPlane`, `ScreenTopology`) n'importe pas AppKit et se

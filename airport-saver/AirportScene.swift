@@ -149,6 +149,39 @@ final class AirportScene: PixelScene {
 
     private var ground: GroundFlight?
     private var arrivals: [ArrivalFlight] = []
+
+    /// Read-only world-space (screen-pixel) position of one tracked plane --
+    /// debug accessor for checks/handoff_check.swift's continuity
+    /// verification, never used by the real screensaver. `worldX`/`worldY`
+    /// use the exact same math as `drawFlight`'s `screenX`/ground-relative Y
+    /// (minus the sprite-size draw offset, since a center point is all the
+    /// check needs), so this always agrees with what's actually rendered.
+    struct TrackedPlane {
+        let worldX: CGFloat
+        let worldY: CGFloat
+        let isDeparture: Bool
+    }
+
+    /// Every plane this scene is currently simulating (ground flight, if
+    /// any, plus every airborne arrival), in world-space coordinates.
+    var trackedPlanes: [TrackedPlane] {
+        var out: [TrackedPlane] = []
+        if let ground {
+            out.append(TrackedPlane(worldX: worldX(ground.plane, direction: ground.direction),
+                                     worldY: runwayGroundY - ground.plane.altitude,
+                                     isDeparture: ground.isDeparture))
+        }
+        for arrival in arrivals {
+            out.append(TrackedPlane(worldX: worldX(arrival.plane, direction: arrival.direction),
+                                     worldY: runwayGroundY - arrival.plane.altitude,
+                                     isDeparture: false))
+        }
+        return out
+    }
+
+    private func worldX(_ plane: RunwayPlane, direction: Int) -> CGFloat {
+        direction == 1 ? plane.x : canvasWidth - plane.x
+    }
     private var idleTimer: TimeInterval = 0
     private var nextIdleInterval = TimeInterval.random(in: 8...15, using: &FlightCoordinator.shared.rng)
     /// Single-screen go-around retries (see `onGoAroundExit`'s doc): each
