@@ -83,15 +83,19 @@ struct SkyPlane {
     /// per-frame per-plane shows up as real frame cost.
     let climbShape: [String]
     let descendShape: [String]
-    /// Set the instant this plane's leading edge crosses this slot's edge
-    /// and it's been relayed to the neighbor -- keeps it from relaying a
-    /// second time while it finishes crossing off this screen for real
-    /// (see `SkyScene.update`'s overlap-handoff loop).
+    /// Set the instant this plane's leading edge crosses this screen's edge
+    /// (horizontally or vertically) and it's been relayed to the neighbor --
+    /// keeps it from relaying a second time while it finishes crossing off
+    /// this screen for real (see `SkyScene.update`'s overlap-handoff loop).
     var handedOff = false
 }
 
 final class SkyScene: PixelScene {
-    let slot: Int
+    /// Real NSScreen.screens index (this scene's identity for
+    /// FlightCoordinator registration/relay) -- not a chain slot; a screen
+    /// stacked above/below the main horizontal chain has no slot at all
+    /// but still needs to be addressable.
+    let screenIndex: Int
     private let canvasWidth: CGFloat
     private var time: TimeInterval = 0
     private(set) var planes: [SkyPlane] = []
@@ -100,17 +104,17 @@ final class SkyScene: PixelScene {
     // header) so the gradient seam and ground line align across screens.
     private let horizon = 176
 
-    private var nextLocalSpawn = TimeInterval.random(in: 4...9)
+    private var nextLocalSpawn = TimeInterval.random(in: 4...9, using: &FlightCoordinator.shared.rng)
 
     private struct Cloud { var x: CGFloat; let y: CGFloat; let speed: CGFloat; let art: [String] }
     private var clouds: [Cloud]
 
-    init(slot: Int, canvasWidth: Int) {
-        self.slot = slot
+    init(screenIndex: Int, canvasWidth: Int) {
+        self.screenIndex = screenIndex
         self.canvasWidth = CGFloat(canvasWidth)
         clouds = [
-            Cloud(x: CGFloat.random(in: 0..<CGFloat(max(canvasWidth, 1))), y: 26, speed: 4, art: Sprites.cloud1),
-            Cloud(x: CGFloat.random(in: 0..<CGFloat(max(canvasWidth, 1))), y: 66, speed: 2.5, art: Sprites.cloud2),
+            Cloud(x: CGFloat.random(in: 0..<CGFloat(max(canvasWidth, 1)), using: &FlightCoordinator.shared.rng), y: 26, speed: 4, art: Sprites.cloud1),
+            Cloud(x: CGFloat.random(in: 0..<CGFloat(max(canvasWidth, 1)), using: &FlightCoordinator.shared.rng), y: 66, speed: 2.5, art: Sprites.cloud2),
         ]
     }
 
@@ -132,6 +136,22 @@ final class SkyScene: PixelScene {
         let w = CGFloat(Sprites.palettedSize(enteringShape).w)
         let x = fromLeft ? -w / 2 : canvasWidth + w / 2
         planes.append(SkyPlane(x: x, y: y, vx: fromLeft ? speed : -speed, vy: vy, landing: landing, variant: variant,
+                                climbShape: climbShape, descendShape: descendShape))
+    }
+
+    /// Vertical counterpart of `spawn`: introduces a plane climbing in from
+    /// the BOTTOM edge at canvas x `x` (already mapped across the physical
+    /// bezel by FlightCoordinator.relayClimbOut) with its horizontal/
+    /// vertical rate carried unchanged from the screen below, so the
+    /// crossing reads as one continuous climb, not a fresh random spawn.
+    /// Enters at the bottom of the climbing band (the same altitude the
+    /// y-clamp in `update` uses as its lower bound) rather than fully
+    /// offscreen, matching `spawn`'s "leading edge already at the entry
+    /// edge" convention for handoffs.
+    func spawnClimbing(x: CGFloat, vx: CGFloat, vy: CGFloat, variant: FleetVariant) {
+        let climbShape = Sprites.rotated(variant.shape, degrees: 12)
+        let descendShape = Sprites.rotated(variant.shape, degrees: -8)
+        planes.append(SkyPlane(x: x, y: CGFloat(horizon) - 24, vx: vx, vy: vy, landing: false, variant: variant,
                                 climbShape: climbShape, descendShape: descendShape))
     }
 
@@ -163,9 +183,22 @@ final class SkyScene: PixelScene {
             planes[i].y = min(max(planes[i].y, 12), CGFloat(horizon) - 24)
         }
 
-        if FlightCoordinator.shared.hasSkySlots {
+        // Vertical climb-out: independent of horizontal chain membership --
+        // any climbing plane (on any screen, chain member or not) that
+        // reaches the top of its allowed altitude band checks for a real
+        // screen physically above before falling back to leveling off via
+        // the y-clamp above. Runs before the horizontal check so a plane
+        // relayed vertically this frame doesn't also get evaluated for a
+        // horizontal handoff on the same frame.
+        for i in planes.indices where !planes[i].handedOff && planes[i].vy < 0 && planes[i].y <= 12 {
+            if FlightCoordinator.shared.relayClimbOut(from: screenIndex, plane: planes[i]) {
+                planes[i].handedOff = true
+            }
+        }
+
+        if FlightCoordinator.shared.isChainMember(screenIndex) {
             // Overlap handoff: relay the instant a plane's leading edge
-            // reaches this slot's edge (not once it's fully offscreen),
+            // reaches this screen's edge (not once it's fully offscreen),
             // exactly once per plane -- it keeps flying (and drawing) on
             // this screen until it's actually gone, purely for visual
             // continuity with its new copy on the neighbor.
@@ -176,7 +209,7 @@ final class SkyScene: PixelScene {
                     : planes[i].x - w / 2 <= 0
                 if crossed {
                     planes[i].handedOff = true
-                    FlightCoordinator.shared.skyPlaneExited(slot: slot, plane: planes[i])
+                    FlightCoordinator.shared.skyPlaneExited(screen: screenIndex, plane: planes[i])
                 }
             }
             planes.removeAll { plane in
@@ -184,15 +217,20 @@ final class SkyScene: PixelScene {
                 return plane.x < -w || plane.x > canvasWidth + w
             }
         } else {
+            // Not on the main horizontal chain (standalone, or only
+            // reachable vertically) -- fed by nothing but its own ambient
+            // schedule, so it's never left empty. A vertically-relayed
+            // plane (handedOff above) still gets swept once it drifts far
+            // enough off either side.
             planes.removeAll { $0.x < -200 || $0.x > canvasWidth + 200 }
             nextLocalSpawn -= dt
             if nextLocalSpawn <= 0 {
-                nextLocalSpawn = .random(in: 10...20)
+                nextLocalSpawn = .random(in: 10...20, using: &FlightCoordinator.shared.rng)
                 spawn(
-                    fromLeft: Bool.random(),
-                    y: CGFloat.random(in: 30...(CGFloat(horizon) - 20)),
-                    speed: CGFloat.random(in: 30...55),
-                    vy: CGFloat.random(in: -3...3),
+                    fromLeft: Bool.random(using: &FlightCoordinator.shared.rng),
+                    y: CGFloat.random(in: 30...(CGFloat(horizon) - 20), using: &FlightCoordinator.shared.rng),
+                    speed: CGFloat.random(in: 30...55, using: &FlightCoordinator.shared.rng),
+                    vy: CGFloat.random(in: -3...3, using: &FlightCoordinator.shared.rng),
                     landing: false,
                     variant: .random()
                 )
@@ -235,9 +273,9 @@ final class SkyScene: PixelScene {
 
     private func drawStars(_ c: PixelCanvas, w: Int) {
         let starCount = max(90, w * 110 / 480)
-        // Seed offset by slot so neighboring screens don't render an
+        // Seed offset by screenIndex so neighboring screens don't render an
         // identical starfield -- the gradient/horizon still line up.
-        let seq = lcgSequence(seed: 1000 &+ UInt32(slot), count: starCount)
+        let seq = lcgSequence(seed: 1000 &+ UInt32(screenIndex), count: starCount)
         for (i, v) in seq.enumerated() {
             let x = Int(v % UInt32(w))
             let y = Int((v >> 8) % UInt32(horizon - 6))
@@ -272,7 +310,7 @@ final class SkyScene: PixelScene {
         c.fill(0, horizon, w, c.height - horizon, 0x0E1120)
 
         let speckleCount = max(120, w * 140 / 480)
-        let seq = lcgSequence(seed: 900 &+ UInt32(slot), count: speckleCount)
+        let seq = lcgSequence(seed: 900 &+ UInt32(screenIndex), count: speckleCount)
         for v in seq {
             let x = Int(v % UInt32(w))
             let y = horizon + Int((v >> 8) % UInt32(c.height - horizon))
@@ -283,7 +321,7 @@ final class SkyScene: PixelScene {
         // the airport continues off past this screen, without drawing an
         // actual runway here.
         let lightCount = max(20, w * 24 / 480)
-        let lightSeq = lcgSequence(seed: 500 &+ UInt32(slot), count: lightCount)
+        let lightSeq = lcgSequence(seed: 500 &+ UInt32(screenIndex), count: lightCount)
         for v in lightSeq {
             let x = Int(v % UInt32(w))
             let y = horizon + 2 + Int((v >> 10) % 22)

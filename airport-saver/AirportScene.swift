@@ -101,64 +101,95 @@ final class AirportScene: PixelScene {
     /// coordinator, e.g. single-screen/preview) defaults to +1.
     var departureDirection: (() -> Int)?
 
+    /// Fired the moment a go-around's leading edge crosses the exit edge
+    /// (the far side from wherever it entered, same overlap-handoff timing
+    /// as `onDepartureExit`), with its altitude/speed/variant and the
+    /// flight's own `direction` -- FlightCoordinator uses `direction` to
+    /// work out which side is the far side and relays it there, then
+    /// schedules its retry landing. Nil (no coordinator, e.g. single-
+    /// screen/preview) means this scene retries its own landing instead
+    /// (see `pendingRetries`).
+    var onGoAroundExit: ((CGFloat, CGFloat, FleetVariant, Int) -> Void)?
+
     // MARK: - Runway traffic state
 
-    private var activePlane: RunwayPlane?
-    private var activeVariant: FleetVariant?
-    private var activeIsDeparture = false
-    private var activeDescendShape: [String] = []
-    private var activeClimbShape: [String] = []
-    /// +1 = this flight exits/enters via the runway's RIGHT edge (legacy,
-    /// default), -1 = via the LEFT edge. Decided per-flight -- see
-    /// `startTakeoff`/`startLanding` -- and applied purely as a mirror at
-    /// draw time (`drawTraffic`); RunwayPlane's own kinematics never see
-    /// it, they always run in their native left-apron/right-exit space.
-    private var activeDirection = 1
-    /// Set once a departure's leading-edge crossing has already fired
-    /// `onDepartureExit` for the current flight, so the still-running
-    /// RunwayPlane (kept alive until it's fully offscreen at `.done`)
-    /// doesn't relay the same flight to the neighbor a second time.
-    private var departureHandedOff = false
+    /// One flight occupying the runway itself: any ground phase (rollout,
+    /// taxiIn, parkPause, taxiOut, taxiToRunway, lineUp, takeoffRoll) or a
+    /// departure's climb. At most one of these exists at a time -- the
+    /// runway is a single resource, which is exactly what an arrival's
+    /// go-around check (`RunwayPlane.step`'s `runwayFree`) is asking about.
+    private struct GroundFlight {
+        var plane: RunwayPlane
+        var variant: FleetVariant
+        /// +1 = this flight exits/enters via the runway's RIGHT edge
+        /// (legacy, default), -1 = via the LEFT edge. Decided per-flight --
+        /// see `startTakeoff`/`spawnApproach` -- and applied purely as a
+        /// mirror at draw time (`drawFlight`); RunwayPlane's own kinematics
+        /// never see it, they always run in their native left-apron/
+        /// right-exit space.
+        var direction: Int
+        var isDeparture: Bool
+        var climbShape: [String] = []  // only used while phase == .climb (departures)
+        var handedOff = false          // departure's onDepartureExit guard, see updateTraffic
+    }
+
+    /// One airborne arrival not (or no longer) on the runway: `.approach`
+    /// heading in, or `.goAround` overflying after being waved off because
+    /// the runway was busy at its commit point. Several can be in the air
+    /// at once -- only the one that actually touches down claims the
+    /// single `ground` slot above.
+    private struct ArrivalFlight {
+        var plane: RunwayPlane
+        var variant: FleetVariant
+        var direction: Int  // see GroundFlight.direction's doc -- same convention
+        var descendShape: [String]  // used while phase == .approach
+        var climbShape: [String]    // pitch-up tilt, used while phase == .goAround
+        var handedOff = false       // onGoAroundExit guard, see updateTraffic
+    }
+
+    private var ground: GroundFlight?
+    private var arrivals: [ArrivalFlight] = []
     private var idleTimer: TimeInterval = 0
-    private var nextIdleInterval = TimeInterval.random(in: 8...15)
-    // Queued forced approaches (relayed arrivals landing on this screen).
-    // A small FIFO instead of a Bool: two sky planes can cross into the
-    // main slot in close succession, and each needs its own variant
-    // preserved through to the runway -- a Bool would collapse both
-    // requests into one landing and drop a variant. Capped at 2 so a
-    // pathological burst can't grow this unbounded.
-    private var queuedApproaches: [(variant: FleetVariant?, direction: Int, speed: CGFloat, altitude: CGFloat?)] = []
+    private var nextIdleInterval = TimeInterval.random(in: 8...15, using: &FlightCoordinator.shared.rng)
+    /// Single-screen go-around retries (see `onGoAroundExit`'s doc): each
+    /// entry fires its own forced landing once `time` reaches `fireAt`,
+    /// carrying the same variant so it visibly is the same plane coming
+    /// back. A small list, not one slot -- more than one go-around can be
+    /// in the air waiting to retry at once.
+    private var pendingRetries: [(fireAt: TimeInterval, variant: FleetVariant)] = []
 
     init(canvasWidth: Int, localTraffic: Bool = true) {
         self.canvasWidth = CGFloat(canvasWidth)
         self.localTraffic = localTraffic
     }
 
-    /// Debug/testing hook (and FlightCoordinator's relay landing path):
-    /// force a landing to start as soon as no plane is active, bypassing
-    /// the random idle scheduler (and `localTraffic`). `variant` carries a
-    /// relayed flight's fleet type through to the runway; nil picks a
-    /// random one (deterministic sequence renders use the default).
+    /// Debug/testing hook (and FlightCoordinator's relay landing path): an
+    /// arriving relay ALWAYS spawns an airborne approach instantly -- bezel
+    /// continuity is sacred, so this never waits invisibly on the runway.
+    /// If the runway turns out to be busy once this approach reaches its
+    /// commit point, it goes around instead (see `RunwayPlane.step`'s
+    /// `runwayFree`/`.goAround`). `variant` carries a relayed flight's
+    /// fleet type through to the runway; nil picks a random one
+    /// (deterministic sequence renders use the default).
     /// `direction`/`speed`/`altitude` matter only for relayed arrivals: a
     /// non-nil `altitude` seeds the new RunwayPlane's leading edge exactly
     /// at this screen's entry edge (instead of RunwayPlane's default
     /// fully-offscreen spawn) with a matching height and speed, so a
     /// handoff from a neighboring sky screen reads as one continuous
-    /// plane -- see `startLanding`. Callers that just want the legacy
+    /// plane -- see `spawnApproach`. Callers that just want the legacy
     /// glide-in-from-offscreen landing (ambient scheduling, this file's
     /// own render check) leave `altitude` nil.
     func queueApproach(variant: FleetVariant? = nil, direction: Int = 1, speed: CGFloat = 42, altitude: CGFloat? = nil) {
-        guard queuedApproaches.count < 2 else { return }
-        queuedApproaches.append((variant, direction, speed, altitude))
+        spawnApproach(variant: variant, direction: direction, entrySpeed: speed, entryAltitude: altitude)
     }
 
     /// Debug/testing hook mirroring `queueApproach`: forces a takeoff to
-    /// begin the moment no plane is active, bypassing the random idle
+    /// begin the moment the runway is free, bypassing the random idle
     /// scheduler. Only used by checks/render.swift (the "takeoff" case and
-    /// the "handoff" composite), which need a takeoff to start at a known
-    /// simulated time -- never called by the real screensaver.
+    /// the "handoff"/"goaround" composites), which need a takeoff to start
+    /// at a known simulated time -- never called by the real screensaver.
     func forceTakeoff() {
-        guard activePlane == nil else { return }
+        guard ground == nil else { return }
         startTakeoff()
     }
 
@@ -183,13 +214,14 @@ final class AirportScene: PixelScene {
     // MARK: - Runway traffic
 
     private func updateTraffic(dt: TimeInterval) {
-        // Both flows now end fully offscreen (a departure climbs out past
-        // the right edge, an arrival taxis back out past the left edge
-        // after its parkPause), so .done is cleared immediately below --
-        // activePlane is never left sitting in .done across calls.
-        if var plane = activePlane {
-            plane.step(dt: CGFloat(dt), canvasWidth: canvasWidth)
-            activePlane = plane
+        let dtc = CGFloat(dt)
+
+        // Both ground flows now end fully offscreen (a departure climbs
+        // out past the right edge, an arrival taxis back out past the left
+        // edge after its parkPause), so .done is cleared immediately below
+        // -- `ground` is never left sitting in .done across calls.
+        if var flight = ground {
+            flight.plane.step(dt: dtc, canvasWidth: canvasWidth)
 
             // Overlap handoff: fire the instant the departure's leading
             // edge reaches the exit edge (not when it's fully offscreen),
@@ -200,49 +232,84 @@ final class AirportScene: PixelScene {
             // mirroring at draw time reflects both plane.x and the exit
             // edge around canvasWidth/2, so the condition on native x is
             // identical for +1 (right exit) and -1 (left exit).
-            if plane.phase == .climb, activeIsDeparture, !departureHandedOff, let variant = activeVariant {
-                let halfWidth = CGFloat(Sprites.palettedSize(activeClimbShape).w) / 2
-                if plane.x >= canvasWidth - halfWidth {
-                    departureHandedOff = true
-                    onDepartureExit?(plane.altitude, abs(plane.speed), variant)
+            if flight.plane.phase == .climb, flight.isDeparture, !flight.handedOff {
+                let halfWidth = CGFloat(Sprites.palettedSize(flight.climbShape).w) / 2
+                if flight.plane.x >= canvasWidth - halfWidth {
+                    flight.handedOff = true
+                    onDepartureExit?(flight.plane.altitude, abs(flight.plane.speed), flight.variant)
                 }
             }
-            if plane.phase == .done {
-                activePlane = nil
-                activeVariant = nil
-            }
-            return
+            ground = flight.plane.phase == .done ? nil : flight
         }
 
-        // Falls through here with no active plane -- fair game to
-        // overwrite with the next flight.
-        if !queuedApproaches.isEmpty {
-            let req = queuedApproaches.removeFirst()
-            startLanding(variant: req.variant, direction: req.direction, entrySpeed: req.speed, entryAltitude: req.altitude)
-            return
+        // Step every airborne arrival. Sequential (not mapped in one
+        // pass): `runwayFree` is recomputed fresh for each one, right
+        // before its own step, so a sibling arrival that just committed to
+        // land earlier in this very same pass also blocks this one --
+        // RunwayPlane.isCommittedToLand is what makes that visible from
+        // outside without RunwayPlane knowing anything about the scene.
+        for i in arrivals.indices {
+            let runwayFree = ground == nil && !arrivals.contains { $0.plane.isCommittedToLand }
+            arrivals[i].plane.step(dt: dtc, canvasWidth: canvasWidth, runwayFree: runwayFree)
+
+            // Go-around overlap handoff: same leading-edge-at-the-exit-edge
+            // timing as a departure's, just on the near-native-zero edge
+            // (a go-around continues in native-decreasing-x, i.e. exits
+            // toward x <= 0, the opposite native edge from a climb).
+            if arrivals[i].plane.phase == .goAround, !arrivals[i].handedOff {
+                let halfWidth = CGFloat(Sprites.palettedSize(arrivals[i].climbShape).w) / 2
+                if arrivals[i].plane.x <= halfWidth {
+                    arrivals[i].handedOff = true
+                    let flight = arrivals[i]
+                    if let onGoAroundExit {
+                        onGoAroundExit(flight.plane.altitude, abs(flight.plane.speed), flight.variant, flight.direction)
+                    } else {
+                        // No coordinator wired (single-screen/preview):
+                        // this scene has no sky to relay through, so it
+                        // schedules its own retry landing instead.
+                        pendingRetries.append((fireAt: time + .random(in: 15...30, using: &FlightCoordinator.shared.rng), variant: flight.variant))
+                    }
+                }
+            }
         }
+
+        // A landed arrival claims the runway -- at most one can reach
+        // .rollout in a given pass (isCommittedToLand above guarantees
+        // only one arrival is ever "cleared" to touch down at a time).
+        if let landedIndex = arrivals.firstIndex(where: { $0.plane.phase == .rollout }) {
+            let landed = arrivals.remove(at: landedIndex)
+            ground = GroundFlight(plane: landed.plane, variant: landed.variant, direction: landed.direction, isDeparture: false)
+        }
+        arrivals.removeAll { $0.plane.phase == .done }
+
+        if !pendingRetries.isEmpty {
+            let due = pendingRetries.filter { $0.fireAt <= time }
+            if !due.isEmpty {
+                pendingRetries.removeAll { $0.fireAt <= time }
+                for retry in due { spawnApproach(variant: retry.variant) }
+            }
+        }
+
+        guard ground == nil else { return }
 
         idleTimer += dt
         guard idleTimer >= nextIdleInterval else { return }
         idleTimer = 0
-        nextIdleInterval = .random(in: 8...15)
+        nextIdleInterval = .random(in: 8...15, using: &FlightCoordinator.shared.rng)
         // See localTraffic's doc comment: takeoffs always self-schedule,
         // ambient landings only do when there's no coordinator relaying
         // arrivals in.
         if localTraffic {
-            Bool.random() ? startLanding() : startTakeoff()
+            Bool.random(using: &FlightCoordinator.shared.rng) ? spawnApproach() : startTakeoff()
         } else {
             startTakeoff()
         }
     }
 
-    private func startLanding(variant: FleetVariant? = nil, direction: Int = 1, entrySpeed: CGFloat = 42, entryAltitude: CGFloat? = nil) {
+    private func spawnApproach(variant: FleetVariant? = nil, direction: Int = 1, entrySpeed: CGFloat = 42, entryAltitude: CGFloat? = nil) {
         let variant = variant ?? FleetVariant.random()
-        activeVariant = variant
-        activeIsDeparture = false
-        activeDirection = direction
-        activeDescendShape = Sprites.rotated(variant.shape, degrees: -8)
-        activeClimbShape = []
+        let descendShape = Sprites.rotated(variant.shape, degrees: -8)
+        let climbShape = Sprites.rotated(variant.shape, degrees: 12) // pitch-up tilt, only used if this flight later goes around
         var plane = RunwayPlane.landing(canvasWidth: canvasWidth)
         if let entryAltitude {
             // Relayed arrival handed off from a neighboring sky screen:
@@ -252,44 +319,54 @@ final class AirportScene: PixelScene {
             // note in updateTraffic) instead of RunwayPlane's default
             // fully-offscreen spawn, and match the sky's height/speed, so
             // the crossing reads as one continuous plane.
-            let halfWidth = CGFloat(Sprites.palettedSize(activeDescendShape).w) / 2
+            let halfWidth = CGFloat(Sprites.palettedSize(descendShape).w) / 2
             plane.x = canvasWidth + halfWidth
             plane.altitude = entryAltitude
             plane.speed = -abs(entrySpeed)
         }
-        activePlane = plane
+        arrivals.append(ArrivalFlight(plane: plane, variant: variant, direction: direction, descendShape: descendShape, climbShape: climbShape))
     }
 
     private func startTakeoff() {
         let variant = FleetVariant.random()
-        activeVariant = variant
-        activeIsDeparture = true
-        activeDirection = departureDirection?() ?? 1
-        departureHandedOff = false
-        activeClimbShape = Sprites.rotated(variant.shape, degrees: 12)
-        activeDescendShape = []
-        activePlane = .takeoff(canvasWidth: canvasWidth)
+        let direction = departureDirection?() ?? 1
+        let climbShape = Sprites.rotated(variant.shape, degrees: 12)
+        ground = GroundFlight(plane: .takeoff(canvasWidth: canvasWidth), variant: variant, direction: direction, isDeparture: true, climbShape: climbShape)
     }
 
     private func drawTraffic(_ c: PixelCanvas, w: Int) {
-        guard let plane = activePlane, let variant = activeVariant else { return }
-        let baseMirrored = !activeIsDeparture // landing flies right-to-left; base art faces right
+        // Ground flight first, then airborne arrivals on top -- with
+        // different altitudes there's no real z-order ambiguity, but
+        // matches the natural reading order (taxiway, then sky).
+        if let ground {
+            drawFlight(c, plane: ground.plane, variant: ground.variant, direction: ground.direction,
+                       isDeparture: ground.isDeparture, descendShape: [], climbShape: ground.climbShape)
+        }
+        for arrival in arrivals {
+            drawFlight(c, plane: arrival.plane, variant: arrival.variant, direction: arrival.direction,
+                       isDeparture: false, descendShape: arrival.descendShape, climbShape: arrival.climbShape)
+        }
+    }
+
+    private func drawFlight(_ c: PixelCanvas, plane: RunwayPlane, variant: FleetVariant, direction: Int,
+                             isDeparture: Bool, descendShape: [String], climbShape: [String]) {
+        let baseMirrored = !isDeparture // landing flies right-to-left; base art faces right
         // direction mirrors the whole draw around the canvas: -1 flips
         // both where the plane sits on screen and which way its sprite
         // faces, so a flight sent left still noses in the direction it's
         // actually moving. RunwayPlane's own `plane.x` never changes --
         // it always runs in its native left-apron/right-exit space.
-        let mirrored = activeDirection == 1 ? baseMirrored : !baseMirrored
+        let mirrored = direction == 1 ? baseMirrored : !baseMirrored
 
         let shape: [String]
         switch plane.phase {
-        case .approach: shape = activeDescendShape
-        case .climb: shape = activeClimbShape
+        case .approach: shape = descendShape
+        case .climb, .goAround: shape = climbShape // goAround reuses the climb (pitch-up) tilt
         default: shape = variant.shape // level on the ground: rollout, taxiIn, parkPause, taxiOut, taxiToRunway, lineUp, takeoffRoll
         }
 
         let size = Sprites.palettedSize(shape)
-        let screenX = activeDirection == 1 ? plane.x : canvasWidth - plane.x
+        let screenX = direction == 1 ? plane.x : canvasWidth - plane.x
         let drawX = Int((screenX - CGFloat(size.w) / 2).rounded())
         let drawY = Int((runwayGroundY - plane.altitude).rounded()) - size.h
 

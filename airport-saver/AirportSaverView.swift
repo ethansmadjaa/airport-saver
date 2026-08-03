@@ -43,20 +43,21 @@ class AirportSaverView: ScreenSaverView {
 
         let frames = NSScreen.screens.map(\.frame)
         FlightCoordinator.shared.configure(frames: frames)
-        let topology = FlightCoordinator.shared.topology
-        let slot = screenIndex < topology.slotForScreen.count ? topology.slotForScreen[screenIndex] : 0
 
         if screenIndex == 0 {
             let airport = AirportScene(canvasWidth: canvas.width, localTraffic: !FlightCoordinator.shared.hasSkySlots)
             airport.onDepartureExit = { altitude, speed, variant in
                 FlightCoordinator.shared.departureExited(altitude: altitude, speed: speed, variant: variant)
             }
+            airport.onGoAroundExit = { altitude, speed, variant, direction in
+                FlightCoordinator.shared.goAroundExited(direction: direction, altitude: altitude, speed: speed, variant: variant)
+            }
             airport.departureDirection = { FlightCoordinator.shared.startDeparture() }
             FlightCoordinator.shared.registerAirport(airport)
             return airport
         }
 
-        let sky = SkyScene(slot: slot, canvasWidth: canvas.width)
+        let sky = SkyScene(screenIndex: screenIndex, canvasWidth: canvas.width)
         FlightCoordinator.shared.registerSky(sky)
         return sky
     }

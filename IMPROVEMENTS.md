@@ -5,27 +5,13 @@ et les idées qui rendraient le saver encore meilleur. Classé par impact.
 
 ## Dette assumée (issue des revues de code)
 
-- **Espace colorimétrique** — `PixelCanvas.cgColor` construit des couleurs en
-  generic-RGB dans un contexte deviceRGB : le même hex rend légèrement différent
-  selon le helper qui dessine (mesuré : jusqu'à +26 sur un canal). Toute la
-  validation visuelle a eu lieu à travers ce pipeline, donc le « corriger »
-  changerait d'un coup toute la palette approuvée. À faire un jour comme un
-  changement délibéré : unifier vers deviceRGB puis re-valider les rendus.
-- **Dispositions verticales d'écrans** — `ScreenTopology` modélise une bande
-  gauche→droite (tri sur `minX`). Un moniteur posé au-dessus du laptop obtient
-  un slot arbitraire et le relais gauche/droite ne correspond plus à la
-  géométrie physique. Modéliser un graphe d'adjacence 2D si le besoin arrive.
-- **Arrivée pendant piste occupée** — si un avion traverse vers l'écran
-  principal pendant qu'un autre occupe la piste, il patiente en file (max 2) et
-  entre avec du retard : la continuité visuelle du bezel est perdue dans ce cas.
-  Piste : le faire entrer quand même en approche et orbiter/remettre les gaz.
-- **`make install` livre le build Debug** — 2-3× plus lent par frame que
-  Release. Ajouter une target `install-release`.
 - **`MACOSX_DEPLOYMENT_TARGET = 26.4`** — rien dans le code ne l'exige ; le
   bundle refuse de charger sur des macOS plus anciens pour rien.
-- **Aléatoire non seedable** — le trafic utilise l'aléatoire stdlib. Sans
-  graine, impossible de synchroniser deux instances ou de reproduire un bug de
-  trafic exactement. Passer à un PRNG seedable si besoin.
+
+Réglées le 2026-08-03 : topologie 2D des écrans (adjacence par bords réels,
+relais vertical des montées), remise des gaz quand la piste est occupée (plus
+de file invisible), `make install` en Release, PRNG seedable (SplitMix64,
+rendus déterministes par seed).
 
 ## Idées de fonctionnalités (par ordre d'envie probable)
 

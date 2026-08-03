@@ -54,6 +54,40 @@ struct RunwayCheck {
         assert(takeoff.x > w, "takeoff did not exit past the right edge")
         assert(takeoff.altitude > 40, "takeoff altitude too low at exit")
 
+        // Go-around: an approach stepped with the runway busy (runwayFree:
+        // false) must divert at its commit point instead of ever reaching
+        // rollout -- climb back to a cruise-ish altitude, exit fully
+        // offscreen the far side (still moving in the same direction it
+        // was already travelling), never touch down, altitude never
+        // negative, done well under 60s.
+        var goAround = RunwayPlane.landing(canvasWidth: w)
+        var sawGoAround = false
+        var maxGoAroundAltitude: CGFloat = 0
+        var goAroundTime: CGFloat = 0
+        while goAround.phase != .done {
+            goAround.step(dt: dt, canvasWidth: w, runwayFree: false)
+            goAroundTime += dt
+            assert(goAround.altitude >= 0, "go-around altitude went negative")
+            assert(goAround.phase != .rollout, "go-around touched down despite a busy runway")
+            assert(goAroundTime < 60, "go-around did not reach done within 60s")
+            if goAround.phase == .goAround {
+                sawGoAround = true
+                maxGoAroundAltitude = max(maxGoAroundAltitude, goAround.altitude)
+            }
+        }
+        assert(sawGoAround, "go-around never entered .goAround phase")
+        assert(maxGoAroundAltitude >= 60, "go-around did not climb back to a cruise-ish altitude")
+        assert(goAround.x < 0, "go-around did not exit fully offscreen")
+
+        // Unobstructed landing must be byte-identical to before: `step`'s
+        // new `runwayFree` parameter defaults to `true`, so a landing that
+        // never passes `runwayFree: false` must never divert.
+        var unobstructed = RunwayPlane.landing(canvasWidth: w)
+        while unobstructed.phase != .done {
+            unobstructed.step(dt: dt, canvasWidth: w)
+            assert(unobstructed.phase != .goAround, "unobstructed landing went around")
+        }
+
         print("runway_check OK")
     }
 }

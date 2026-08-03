@@ -383,7 +383,33 @@ struct FleetVariant {
         Sprites.crimsonPalette, Sprites.forestPalette, Sprites.violetPalette,
     ]
 
+    static func random(using rng: inout SplitMix64) -> FleetVariant {
+        FleetVariant(shape: shapes.randomElement(using: &rng)!, palette: liveries.randomElement(using: &rng)!)
+    }
+
+    /// No-arg convenience so call sites (AirportScene/SkyScene/render
+    /// checks) stay tidy -- draws from the single shared, seedable RNG
+    /// (see FlightCoordinator.rng).
     static func random() -> FleetVariant {
-        FleetVariant(shape: shapes.randomElement()!, palette: liveries.randomElement()!)
+        random(using: &FlightCoordinator.shared.rng)
+    }
+}
+
+/// Seedable PRNG (splitmix64) -- the sole source of traffic randomness
+/// (spawn timing, fleet picks, positions, speeds) across every scene, so a
+/// render can be reproduced bit-for-bit by reseeding
+/// `FlightCoordinator.shared.rng` (see `FlightCoordinator.reseed(_:)`)
+/// instead of relying on stdlib's non-seedable `Bool`/`*.random(in:)`.
+struct SplitMix64: RandomNumberGenerator {
+    private var state: UInt64
+
+    init(seed: UInt64) { state = seed }
+
+    mutating func next() -> UInt64 {
+        state &+= 0x9E3779B97F4A7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
+        z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
+        return z ^ (z >> 31)
     }
 }

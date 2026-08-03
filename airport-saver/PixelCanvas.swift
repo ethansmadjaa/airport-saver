@@ -43,8 +43,15 @@ final class PixelCanvas {
         fill(0, 0, width, height, rgb)
     }
 
+    // Composantes posées directement dans l'espace du contexte (deviceRGB),
+    // comme le `fillA` des scènes — le même hex rend identique partout.
     func fill(_ x: Int, _ y: Int, _ w: Int, _ h: Int, _ rgb: UInt32) {
-        ctx.setFillColor(Self.cgColor(rgb))
+        ctx.setFillColor(
+            red: CGFloat((rgb >> 16) & 0xFF) / 255,
+            green: CGFloat((rgb >> 8) & 0xFF) / 255,
+            blue: CGFloat(rgb & 0xFF) / 255,
+            alpha: 1
+        )
         ctx.fill(CGRect(x: x, y: y, width: w, height: h))
     }
 
@@ -54,14 +61,5 @@ final class PixelCanvas {
 
     func image() -> CGImage? {
         ctx.makeImage()
-    }
-
-    static func cgColor(_ rgb: UInt32) -> CGColor {
-        CGColor(
-            red: CGFloat((rgb >> 16) & 0xFF) / 255,
-            green: CGFloat((rgb >> 8) & 0xFF) / 255,
-            blue: CGFloat(rgb & 0xFF) / 255,
-            alpha: 1
-        )
     }
 }

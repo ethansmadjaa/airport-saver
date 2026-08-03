@@ -18,6 +18,10 @@ import CoreGraphics
 /// run taxiToRunway -> lineUp -> takeoffRoll -> climb -> done. Both flows
 /// now start and end fully offscreen -- no more "parked forever" plane
 /// left sitting at the apron, no more instant apron pop for a departure.
+///
+/// An approach can also be diverted at a commit point into
+/// approach -> goAround -> done, never touching down: see `step`'s
+/// `runwayFree` parameter and `isCommittedToLand`.
 enum RunwayPhase: Equatable {
     case approach
     case rollout
@@ -28,6 +32,7 @@ enum RunwayPhase: Equatable {
     case lineUp
     case takeoffRoll
     case climb
+    case goAround
     case done
 }
 
@@ -48,6 +53,11 @@ struct RunwayPlane {
     private static let groundEntryMargin: CGFloat = 80    // off-screen spawn/exit distance for ground taxi, fully clears the widest sprite (~107px wide)
     private static let touchdownFraction: CGFloat = 0.62  // where a landing's wheels touch
     private static let rotateFraction: CGFloat = 0.72     // where a departure lifts off
+    // Same fraction as rotateFraction numerically (both ~0.72W, "just before
+    // the flare"), kept as its own named constant since it means something
+    // different: this is an arrival's go-around decision point, not a
+    // departure's liftoff point.
+    private static let goAroundCommitFraction: CGFloat = 0.72
     private static let apronX: CGFloat = 90               // fixed: traffic parks near the buildings, which stay pinned to screen-left regardless of canvasWidth
 
     private static let approachAltitude: CGFloat = 90
@@ -64,6 +74,19 @@ struct RunwayPlane {
     private var lineUpTimer: CGFloat = 0
     /// Only meaningful during `.parkPause`; how long we've been sitting at the apron.
     private var parkPauseElapsed: CGFloat = 0
+    /// One-shot guard: the go-around decision only fires the instant `x`
+    /// first crosses `goAroundCommitFraction`, never on a later step -- once
+    /// this flight is committed (continuing toward touchdown) a runway that
+    /// becomes busy afterwards must not retroactively wave it off.
+    private var hasCheckedRunwayOccupancy = false
+
+    /// True once this approach has passed its go-around decision point and
+    /// been cleared to continue toward touchdown -- i.e. it now effectively
+    /// owns the runway, even though it hasn't reached `.rollout` yet. The
+    /// scene uses this so a second concurrent arrival can't also be cleared
+    /// to land on the same runway slot while this one is still on short
+    /// final (see `step`'s `runwayFree` parameter).
+    var isCommittedToLand: Bool { phase == .approach && hasCheckedRunwayOccupancy }
 
     static func landing(canvasWidth: CGFloat) -> RunwayPlane {
         RunwayPlane(phase: .approach, x: canvasWidth + entryMargin, altitude: approachAltitude, speed: approachSpeed)
@@ -79,7 +102,14 @@ struct RunwayPlane {
         RunwayPlane(phase: .taxiToRunway, x: -groundEntryMargin, altitude: 0, speed: -taxiSpeed)
     }
 
-    mutating func step(dt: CGFloat, canvasWidth: CGFloat) {
+    /// `runwayFree` is scene knowledge (is the ground/runway slot taken by
+    /// something else right now) fed in purely as a boolean -- RunwayPlane
+    /// never learns *why*, only whether it's clear to continue toward
+    /// touchdown at its own commit point. Ignored by every phase except the
+    /// single check inside `.approach`; defaults to `true` so every other
+    /// call site (takeoffs, and any landing that will never face a busy
+    /// runway) reads exactly as before.
+    mutating func step(dt: CGFloat, canvasWidth: CGFloat, runwayFree: Bool = true) {
         let touchdownX = canvasWidth * Self.touchdownFraction
         let rotateX = canvasWidth * Self.rotateFraction
         let exitX = canvasWidth + Self.entryMargin
@@ -90,10 +120,30 @@ struct RunwayPlane {
             let totalDistance = (canvasWidth + Self.entryMargin) - touchdownX
             let remaining = max(x - touchdownX, 0)
             altitude = totalDistance > 0 ? Self.approachAltitude * (remaining / totalDistance) : 0
-            if x <= touchdownX {
+
+            let commitX = canvasWidth * Self.goAroundCommitFraction
+            if !hasCheckedRunwayOccupancy, x <= commitX {
+                hasCheckedRunwayOccupancy = true
+                if !runwayFree {
+                    phase = .goAround
+                }
+            }
+            if phase == .approach, x <= touchdownX {
                 x = touchdownX
                 altitude = 0
                 phase = .rollout
+            }
+
+        case .goAround:
+            // Waved off: pitch up and climb back out, continuing in the
+            // same (native, decreasing-x) direction it was already
+            // travelling -- it overflies the field and exits the far side,
+            // never touching down.
+            speed -= Self.climbSpeedGain * dt
+            x += speed * dt
+            altitude += Self.climbRate * dt
+            if x <= -Self.entryMargin {
+                phase = .done
             }
 
         case .rollout:
