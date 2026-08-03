@@ -1,0 +1,31 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Xcode — user state & build artifacts
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+DerivedData/
+build/
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager (si un jour)
+.build/
+.swiftpm/
+
+# Outillage agents (scratch de session, jamais versionné)
+.superpowers/
+docs/superpowers/
+
+# Références locales hors repo (copyright / brouillons)
+planes/
+planes_pixel/*.jpg
+planes_pixel/*.jpeg
+
+# Rendus locaux du harnais
+/tmp-renders/
